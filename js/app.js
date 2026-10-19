@@ -195,8 +195,11 @@ const session = {
 
   async clear() {
     clearTimeout(this.timer);
+    this.timer = 0;
     try { await dbDelete('task'); } catch { /* ignore */ }
+    try { await dbDelete('handle'); } catch { /* ignore */ }
     this.id = null;
+    this.signature = '';
   }
 };
 
@@ -426,7 +429,8 @@ async function analyze(rawLink) {
     }
     state.scan = scan;
     for (const f of scan.files) state.selected.add(f.rel);
-    els.linkHint.textContent = `Ссылка открыта: ${scan.files.length} ${filesWord(scan.files.length)}, ${scan.folders} ${foldersWord(scan.folders)} — проверьте список и выберите место.`;
+    els.linkHint.textContent = `Ссылка открыта: ${scan.files.length} ${filesWord(scan.files.length)}, ${scan.folders} ${foldersWord(scan.folders)} — проверьте список и выберите место.`
+      + (scan.invalid ? ` ${scan.invalid} ${filesWord(scan.invalid)} с недопустимыми именами пропущено.` : '');
     renderScan();
     els.runCard.hidden = false;
     els.errorsCard.hidden = true;
@@ -607,7 +611,10 @@ function renderRun(snapshot) {
     if (active.length > 4) {
       const li = document.createElement('li');
       li.className = 'active__item';
-      li.innerHTML = `<span class="active__meta">и ещё ${active.length - 4} ${filesWord(active.length - 4)}</span>`;
+      const rest = document.createElement('span');
+      rest.className = 'active__meta';
+      rest.textContent = `и ещё ${active.length - 4} ${filesWord(active.length - 4)}`;
+      li.append(rest);
       els.activeList.append(li);
     }
   } else {
@@ -742,6 +749,10 @@ function saveReportTxt() {
 async function importReport(file) {
   showError(els.importError, '');
   try {
+    if (file.size > 8 * 1024 * 1024) {
+      showError(els.importError, 'Файл больше 8 МБ — это не отчёт «Файлов с Диска».');
+      return;
+    }
     const text = await file.text();
     const report = parseReport(text);
     if (!report.failed.length) { showError(els.importError, 'В журнале нет неудачных файлов — повторять нечего.'); return; }
@@ -757,7 +768,8 @@ async function importReport(file) {
     }
     const files = report.failed.map(f => ({ rel: f.rel, path: f.path, name: f.name || f.rel.split('/').pop(), size: f.size, md5: null, type: 'file' }));
     startRun(files, { retry: true });
-    els.runHint.textContent = `Повтор из журнала: ${files.length} ${filesWord(files.length)}. Уже скачанное пропускается.`;
+    els.runHint.textContent = `Повтор из журнала: ${files.length} ${filesWord(files.length)}. Уже скачанное пропускается.`
+      + (report.invalid ? ` ${report.invalid} ${filesWord(report.invalid)} с недопустимыми именами пропущено.` : '');
   } catch (err) {
     showError(els.importError, err?.message || 'Журнал не открылся.');
   }

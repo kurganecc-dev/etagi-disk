@@ -183,6 +183,28 @@ function relativePath(abs, root) {
 
 const collator = new Intl.Collator('ru', { numeric: true, sensitivity: 'base' });
 
+/* Путь из Диска не должен выводить за пределы выбранной папки: ‘..’, пустые
+   сегменты, управляющие символы и слишком длинные имена отбрасываем. */
+export function relProblem(rel) {
+  if (typeof rel !== 'string' || !rel) return 'пустой путь';
+  if (rel.length > 1024) return 'слишком длинный путь';
+  for (const part of rel.split('/')) {
+    if (!part) return 'пустой сегмент';
+    if (part === '.' || part === '..') return 'переход по ..';
+    if (/[\u0000-\u001f\u007f]/.test(part)) return 'управляющие символы';
+    if (part.length > 255) return 'слишком длинное имя';
+  }
+  return null;
+}
+
+export function assertRelPath(rel) {
+  const problem = relProblem(rel);
+  if (problem) {
+    throw new DiskError(`Недопустимое имя файла (${problem}): ${String(rel).slice(0, 80)}`, { code: 'BAD_NAME' });
+  }
+  return rel;
+}
+
 /* Обход публичной папки: возвращает дерево файлов и общую статистику. */
 export async function scanFolder({ publicKey, path = '/', signal, onProgress } = {}) {
   const rootRes = await statResource(publicKey, path, { signal });
@@ -193,6 +215,7 @@ export async function scanFolder({ publicKey, path = '/', signal, onProgress } =
   }
 
   const files = [];
+  const invalid = [];
   let folders = 0;
   let level = [path];
 
@@ -208,6 +231,8 @@ export async function scanFolder({ publicKey, path = '/', signal, onProgress } =
           if (it.type === 'dir') {
             folders++;
             next.push(it.path);
+          } else if (relProblem(rel)) {
+            invalid.push(rel);
           } else {
             files.push({ ...it, rel });
           }
@@ -225,6 +250,8 @@ export async function scanFolder({ publicKey, path = '/', signal, onProgress } =
     files,
     folders,
     bytes,
+    invalid: invalid.length,
+    invalidNames: invalid.slice(0, 5),
     publicKey,
     source: `https://disk.yandex.ru/d/${publicKey.split('/').pop()}`
   };
@@ -252,6 +279,7 @@ export class FolderSink {
   }
 
   async locate(rel, { create = false } = {}) {
+    assertRelPath(rel);
     const parts = rel.split('/');
     const name = parts.pop();
     let dir = this.root;
@@ -305,22 +333,28 @@ export class FolderSink {
 }
 
 async function commitFile(dir, handle, name, tmpName) {
-  const move = typeof handle.move === 'function' ? handle.move.bind(handle) : null;
-  if (move) {
-    try { await move(name); return; }
-    catch { /* имя занято или move не поддержан — пробуем иначе */ }
-    try { await dir.removeEntry(name); await move(name); return; }
-    catch { /* переходим к копированию */ }
-  }
-  const source = await handle.getFile();
-  const target = await dir.getFileHandle(name, { create: true });
-  const writable = await target.createWritable({ keepExistingData: false });
   try {
-    if (source.stream) await source.stream().pipeTo(writable);
-    else { await writable.write(await source.arrayBuffer()); await writable.close(); }
+    const move = typeof handle.move === 'function' ? handle.move.bind(handle) : null;
+    if (move) {
+      try { await move(name); return; }
+      catch { /* имя занято или move не поддержан — пробуем иначе */ }
+      try { await dir.removeEntry(name); await move(name); return; }
+      catch { /* переходим к копированию */ }
+    }
+    const source = await handle.getFile();
+    const target = await dir.getFileHandle(name, { create: true });
+    const writable = await target.createWritable({ keepExistingData: false });
+    try {
+      if (source.stream) await source.stream().pipeTo(writable);
+      else { await writable.write(await source.arrayBuffer()); await writable.close(); }
+    } catch (err) {
+      try { await dir.removeEntry(name); } catch { /* ok */ }
+      throw mapFsError(err);
+    }
   } catch (err) {
-    try { await dir.removeEntry(name); } catch { /* ok */ }
-    throw mapFsError(err);
+    // рабочий файл не создан — временный не должен остаться в папке
+    try { await dir.removeEntry(tmpName); } catch { /* уже нет */ }
+    throw err instanceof DiskError ? err : mapFsError(err);
   }
   try { await dir.removeEntry(tmpName); } catch { /* уже нет */ }
 }
@@ -344,8 +378,11 @@ export class DownloadsSink {
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
+    // структуру сохраняет только выбор папки; имя чистим от служебных символов
+    const safe = assertRelPath(rel).split('/').join(' · ')
+      .replace(/[\u0000-\u001f\u007f<>:"|?*]/g, '_').slice(0, 200) || 'файл';
     a.href = url;
-    a.download = rel.split('/').join(' · ');   // структуру сохраняет только выбор папки
+    a.download = safe;
     a.rel = 'noopener';
     document.body.append(a);
     a.click();
@@ -607,17 +644,28 @@ export function makeReport(run, meta = {}) {
 }
 
 export function parseReport(text) {
+  if (typeof text !== 'string' || text.length > 8 * 1024 * 1024) {
+    throw new DiskError('Журнал слишком большой или пустой — выберите файл отчёта «Файлов с Диска».', { code: 'BAD_REPORT' });
+  }
   let data;
   try { data = JSON.parse(text); }
   catch { throw new DiskError('Это не журнал «Файлов с Диска»: файл повреждён или выбран не тот JSON.', { code: 'BAD_REPORT' }); }
   if (!data || !Array.isArray(data.failed)) {
     throw new DiskError('В журнале нет списка файлов для повтора.', { code: 'BAD_REPORT' });
   }
-  const link = typeof data.link === 'string' ? data.link : null;
+  if (data.failed.length > 20000) {
+    throw new DiskError('В журнале больше 20 000 файлов — сервис не возьмётся за такой повтор.', { code: 'BAD_REPORT' });
+  }
+  const link = typeof data.link === 'string' && data.link.length < 2048 ? data.link : null;
+  let invalid = 0;
   const failed = data.failed
     .filter(f => f && typeof f.path === 'string' && typeof f.rel === 'string')
+    .filter(f => {
+      if (relProblem(f.rel)) { invalid++; return false; }
+      return true;
+    })
     .map(f => ({ rel: f.rel, path: f.path, size: Number.isFinite(f.size) ? f.size : null, name: f.rel.split('/').pop() }));
-  return { link, folder: data.folder || null, failed };
+  return { link, folder: typeof data.folder === 'string' ? data.folder.slice(0, 200) : null, failed, invalid };
 }
 
 /* Человекочитаемый отчёт: его же сохраняем в папку рядом с файлами. */

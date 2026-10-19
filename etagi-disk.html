@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-yjPWXy904S4NR5F+/NnMB16jvBwHdTDfjUhyRF8jnfk='; style-src 'sha256-/wTY9GDSTr8lUMIo+Zvvs4h2Bz3QUR4Nfnd2B/iij4Q='; img-src data:; font-src data:; connect-src https://cloud-api.yandex.net https://downloader.disk.yandex.ru https://*.storage.yandex.net https://*.yandex.net https://*.yandex.ru https://*.yandex.com; base-uri 'none'">
 <meta name="robots" content="noindex, nofollow">
 <title>Файлы с Диска — Этажи</title>
 <meta name="description" content="Скачивание публичной папки Яндекс Диска целиком: сервис обходит вложенные папки и сохраняет файлы по одному.">
@@ -941,6 +942,28 @@ function relativePath(abs, root) {
 
 const collator = new Intl.Collator('ru', { numeric: true, sensitivity: 'base' });
 
+/* Путь из Диска не должен выводить за пределы выбранной папки: ‘..’, пустые
+   сегменты, управляющие символы и слишком длинные имена отбрасываем. */
+function relProblem(rel) {
+  if (typeof rel !== 'string' || !rel) return 'пустой путь';
+  if (rel.length > 1024) return 'слишком длинный путь';
+  for (const part of rel.split('/')) {
+    if (!part) return 'пустой сегмент';
+    if (part === '.' || part === '..') return 'переход по ..';
+    if (/[\u0000-\u001f\u007f]/.test(part)) return 'управляющие символы';
+    if (part.length > 255) return 'слишком длинное имя';
+  }
+  return null;
+}
+
+function assertRelPath(rel) {
+  const problem = relProblem(rel);
+  if (problem) {
+    throw new DiskError(`Недопустимое имя файла (${problem}): ${String(rel).slice(0, 80)}`, { code: 'BAD_NAME' });
+  }
+  return rel;
+}
+
 /* Обход публичной папки: возвращает дерево файлов и общую статистику. */
 async function scanFolder({ publicKey, path = '/', signal, onProgress } = {}) {
   const rootRes = await statResource(publicKey, path, { signal });
@@ -951,6 +974,7 @@ async function scanFolder({ publicKey, path = '/', signal, onProgress } = {}) {
   }
 
   const files = [];
+  const invalid = [];
   let folders = 0;
   let level = [path];
 
@@ -966,6 +990,8 @@ async function scanFolder({ publicKey, path = '/', signal, onProgress } = {}) {
           if (it.type === 'dir') {
             folders++;
             next.push(it.path);
+          } else if (relProblem(rel)) {
+            invalid.push(rel);
           } else {
             files.push({ ...it, rel });
           }
@@ -983,6 +1009,8 @@ async function scanFolder({ publicKey, path = '/', signal, onProgress } = {}) {
     files,
     folders,
     bytes,
+    invalid: invalid.length,
+    invalidNames: invalid.slice(0, 5),
     publicKey,
     source: `https://disk.yandex.ru/d/${publicKey.split('/').pop()}`
   };
@@ -1010,6 +1038,7 @@ class FolderSink {
   }
 
   async locate(rel, { create = false } = {}) {
+    assertRelPath(rel);
     const parts = rel.split('/');
     const name = parts.pop();
     let dir = this.root;
@@ -1063,22 +1092,28 @@ class FolderSink {
 }
 
 async function commitFile(dir, handle, name, tmpName) {
-  const move = typeof handle.move === 'function' ? handle.move.bind(handle) : null;
-  if (move) {
-    try { await move(name); return; }
-    catch { /* имя занято или move не поддержан — пробуем иначе */ }
-    try { await dir.removeEntry(name); await move(name); return; }
-    catch { /* переходим к копированию */ }
-  }
-  const source = await handle.getFile();
-  const target = await dir.getFileHandle(name, { create: true });
-  const writable = await target.createWritable({ keepExistingData: false });
   try {
-    if (source.stream) await source.stream().pipeTo(writable);
-    else { await writable.write(await source.arrayBuffer()); await writable.close(); }
+    const move = typeof handle.move === 'function' ? handle.move.bind(handle) : null;
+    if (move) {
+      try { await move(name); return; }
+      catch { /* имя занято или move не поддержан — пробуем иначе */ }
+      try { await dir.removeEntry(name); await move(name); return; }
+      catch { /* переходим к копированию */ }
+    }
+    const source = await handle.getFile();
+    const target = await dir.getFileHandle(name, { create: true });
+    const writable = await target.createWritable({ keepExistingData: false });
+    try {
+      if (source.stream) await source.stream().pipeTo(writable);
+      else { await writable.write(await source.arrayBuffer()); await writable.close(); }
+    } catch (err) {
+      try { await dir.removeEntry(name); } catch { /* ok */ }
+      throw mapFsError(err);
+    }
   } catch (err) {
-    try { await dir.removeEntry(name); } catch { /* ok */ }
-    throw mapFsError(err);
+    // рабочий файл не создан — временный не должен остаться в папке
+    try { await dir.removeEntry(tmpName); } catch { /* уже нет */ }
+    throw err instanceof DiskError ? err : mapFsError(err);
   }
   try { await dir.removeEntry(tmpName); } catch { /* уже нет */ }
 }
@@ -1102,8 +1137,11 @@ class DownloadsSink {
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
+    // структуру сохраняет только выбор папки; имя чистим от служебных символов
+    const safe = assertRelPath(rel).split('/').join(' · ')
+      .replace(/[\u0000-\u001f\u007f<>:"|?*]/g, '_').slice(0, 200) || 'файл';
     a.href = url;
-    a.download = rel.split('/').join(' · ');   // структуру сохраняет только выбор папки
+    a.download = safe;
     a.rel = 'noopener';
     document.body.append(a);
     a.click();
@@ -1365,17 +1403,28 @@ function makeReport(run, meta = {}) {
 }
 
 function parseReport(text) {
+  if (typeof text !== 'string' || text.length > 8 * 1024 * 1024) {
+    throw new DiskError('Журнал слишком большой или пустой — выберите файл отчёта «Файлов с Диска».', { code: 'BAD_REPORT' });
+  }
   let data;
   try { data = JSON.parse(text); }
   catch { throw new DiskError('Это не журнал «Файлов с Диска»: файл повреждён или выбран не тот JSON.', { code: 'BAD_REPORT' }); }
   if (!data || !Array.isArray(data.failed)) {
     throw new DiskError('В журнале нет списка файлов для повтора.', { code: 'BAD_REPORT' });
   }
-  const link = typeof data.link === 'string' ? data.link : null;
+  if (data.failed.length > 20000) {
+    throw new DiskError('В журнале больше 20 000 файлов — сервис не возьмётся за такой повтор.', { code: 'BAD_REPORT' });
+  }
+  const link = typeof data.link === 'string' && data.link.length < 2048 ? data.link : null;
+  let invalid = 0;
   const failed = data.failed
     .filter(f => f && typeof f.path === 'string' && typeof f.rel === 'string')
+    .filter(f => {
+      if (relProblem(f.rel)) { invalid++; return false; }
+      return true;
+    })
     .map(f => ({ rel: f.rel, path: f.path, size: Number.isFinite(f.size) ? f.size : null, name: f.rel.split('/').pop() }));
-  return { link, folder: data.folder || null, failed };
+  return { link, folder: typeof data.folder === 'string' ? data.folder.slice(0, 200) : null, failed, invalid };
 }
 
 /* Человекочитаемый отчёт: его же сохраняем в папку рядом с файлами. */
@@ -1602,8 +1651,11 @@ const session = {
 
   async clear() {
     clearTimeout(this.timer);
+    this.timer = 0;
     try { await dbDelete('task'); } catch { /* ignore */ }
+    try { await dbDelete('handle'); } catch { /* ignore */ }
     this.id = null;
+    this.signature = '';
   }
 };
 
@@ -1833,7 +1885,8 @@ async function analyze(rawLink) {
     }
     state.scan = scan;
     for (const f of scan.files) state.selected.add(f.rel);
-    els.linkHint.textContent = `Ссылка открыта: ${scan.files.length} ${filesWord(scan.files.length)}, ${scan.folders} ${foldersWord(scan.folders)} — проверьте список и выберите место.`;
+    els.linkHint.textContent = `Ссылка открыта: ${scan.files.length} ${filesWord(scan.files.length)}, ${scan.folders} ${foldersWord(scan.folders)} — проверьте список и выберите место.`
+      + (scan.invalid ? ` ${scan.invalid} ${filesWord(scan.invalid)} с недопустимыми именами пропущено.` : '');
     renderScan();
     els.runCard.hidden = false;
     els.errorsCard.hidden = true;
@@ -2014,7 +2067,10 @@ function renderRun(snapshot) {
     if (active.length > 4) {
       const li = document.createElement('li');
       li.className = 'active__item';
-      li.innerHTML = `<span class="active__meta">и ещё ${active.length - 4} ${filesWord(active.length - 4)}</span>`;
+      const rest = document.createElement('span');
+      rest.className = 'active__meta';
+      rest.textContent = `и ещё ${active.length - 4} ${filesWord(active.length - 4)}`;
+      li.append(rest);
       els.activeList.append(li);
     }
   } else {
@@ -2149,6 +2205,10 @@ function saveReportTxt() {
 async function importReport(file) {
   showError(els.importError, '');
   try {
+    if (file.size > 8 * 1024 * 1024) {
+      showError(els.importError, 'Файл больше 8 МБ — это не отчёт «Файлов с Диска».');
+      return;
+    }
     const text = await file.text();
     const report = parseReport(text);
     if (!report.failed.length) { showError(els.importError, 'В журнале нет неудачных файлов — повторять нечего.'); return; }
@@ -2164,7 +2224,8 @@ async function importReport(file) {
     }
     const files = report.failed.map(f => ({ rel: f.rel, path: f.path, name: f.name || f.rel.split('/').pop(), size: f.size, md5: null, type: 'file' }));
     startRun(files, { retry: true });
-    els.runHint.textContent = `Повтор из журнала: ${files.length} ${filesWord(files.length)}. Уже скачанное пропускается.`;
+    els.runHint.textContent = `Повтор из журнала: ${files.length} ${filesWord(files.length)}. Уже скачанное пропускается.`
+      + (report.invalid ? ` ${report.invalid} ${filesWord(report.invalid)} с недопустимыми именами пропущено.` : '');
   } catch (err) {
     showError(els.importError, err?.message || 'Журнал не открылся.');
   }
