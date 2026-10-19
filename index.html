@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Файлы с Диска — Этажи</title>
+<meta name="description" content="Скачивание публичной папки Яндекс Диска целиком: сервис обходит вложенные папки и сохраняет файлы по одному.">
+<link rel="icon" href="assets/logo/favicon.png">
+<link rel="preload" href="assets/fonts/circe-Regular.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="css/app.css?v=1.0.0">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="./" aria-label="Этажи — Файлы с Диска">
+      <img class="brand__logo" src="assets/logo/logo-etagi-white.png" alt="Этажи" width="132" height="26">
+      <span class="brand__divider" aria-hidden="true"></span>
+      <span class="brand__product">Файлы с Диска</span>
+    </a>
+    <div class="topbar__right">
+      <a class="topbar__link" href="#how">Инструкция</a>
+      <span class="chip chip--ghost">1.0</span>
+    </div>
+  </div>
+</header>
+
+<main class="page">
+
+  <section class="hero">
+    <h1 class="hero__title">Скачать папку с&nbsp;<span class="hero__accent">Яндекс&nbsp;Диска</span> целиком</h1>
+    <p class="hero__lead">Ссылка одна, файлов много. Сервис сам обойдёт вложенные папки, сохранит структуру и будет качать файлы по одному — те, что не получились, попадут в журнал.</p>
+  </section>
+
+  <div class="layout">
+
+    <div class="layout__main">
+
+      <!-- 0. Незаконченная прошлая загрузка -->
+      <section class="resume" id="resume-banner" hidden>
+        <div class="resume__text">
+          <b class="resume__title" id="resume-title">Загрузка не закончена</b>
+          <span class="resume__meta" id="resume-meta">—</span>
+        </div>
+        <div class="resume__actions">
+          <button class="btn btn--primary btn--sm" id="resume-go" type="button">Продолжить</button>
+          <button class="btn btn--ghost btn--sm" id="resume-drop" type="button">Забыть</button>
+        </div>
+      </section>
+
+      <!-- 1. Ссылка и место сохранения -->
+      <section class="card" aria-labelledby="entry-title">
+        <h2 class="card__title" id="entry-title">Ссылка и место сохранения</h2>
+
+        <form id="link-form" class="form" novalidate>
+          <label class="field">
+            <span class="field__label">Публичная ссылка на папку или файл</span>
+            <div class="field__row">
+              <input id="link" class="input" type="url" inputmode="url" autocomplete="off" spellcheck="false"
+                     placeholder="https://disk.yandex.ru/d/…" aria-describedby="link-hint">
+              <button id="analyze" class="btn btn--primary" type="submit">Проверить папку</button>
+            </div>
+          </label>
+          <p class="hint" id="link-hint">Ссылку берут из кнопки «Поделиться» на Диске. Папка должна быть открыта по ссылке — закрытую сервис не увидит.</p>
+          <p class="error-text" id="link-error" role="alert" hidden></p>
+        </form>
+
+        <div class="dest">
+          <div class="dest__head">
+            <span class="field__label">Куда сохранять</span>
+          </div>
+
+          <div class="dest__options" id="dest-options">
+            <button class="dest-card" id="pick-folder" type="button">
+              <span class="dest-card__title">Папка на компьютере</span>
+              <span class="dest-card__text">Структура папок сохранится. Chrome спросит разрешение один раз.</span>
+              <span class="dest-card__value" id="folder-value" hidden></span>
+            </button>
+            <button class="dest-card" id="use-downloads" type="button">
+              <span class="dest-card__title">Загрузки браузера</span>
+              <span class="dest-card__text">Без вложенных папок: путь попадёт в имя файла через « · ».</span>
+              <span class="dest-card__value" id="downloads-value" hidden>выбрано</span>
+            </button>
+          </div>
+
+          <p class="hint" id="dest-hint">Выбор папки — Chrome и Edge. В других браузерах останутся «Загрузки».</p>
+        </div>
+      </section>
+
+      <!-- 2. Что нашлось -->
+      <section class="card" id="scan-card" hidden aria-labelledby="scan-title">
+        <div class="card__head">
+          <div>
+            <p class="eyebrow" id="scan-eyebrow">Папка</p>
+            <h2 class="card__title" id="scan-title">—</h2>
+          </div>
+          <div class="stats" id="scan-stats"></div>
+        </div>
+
+        <div class="toolbar">
+          <div class="search">
+            <input id="filter" class="input input--sm" type="search" placeholder="Найти файл или папку" aria-label="Найти файл или папку">
+          </div>
+          <div class="toolbar__right">
+            <button class="btn btn--ghost btn--sm" id="select-all" type="button">Выбрать все</button>
+            <button class="btn btn--ghost btn--sm" id="select-none" type="button">Снять выбор</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th class="c-check"><span class="sr-only">Выбор</span></th>
+                <th class="c-name">Файл</th>
+                <th class="c-size">Размер</th>
+                <th class="c-state">Статус</th>
+              </tr>
+            </thead>
+            <tbody id="file-rows"></tbody>
+          </table>
+        </div>
+        <div class="table-foot">
+          <span class="hint" id="list-count">—</span>
+          <button class="btn btn--ghost btn--sm" id="more" type="button" hidden>Показать ещё 100</button>
+        </div>
+      </section>
+
+      <!-- 3. Загрузка -->
+      <section class="card" id="run-card" hidden aria-labelledby="run-title">
+        <div class="card__head">
+          <h2 class="card__title" id="run-title">Загрузка</h2>
+          <div class="seg" id="concurrency" role="group" aria-label="Одновременных загрузок">
+            <span class="seg__label">Параллельно</span>
+            <button class="seg__btn" type="button" data-n="1">1</button>
+            <button class="seg__btn is-on" type="button" data-n="5">5</button>
+            <button class="seg__btn" type="button" data-n="10">10</button>
+            <button class="seg__btn" type="button" data-n="20">20</button>
+          </div>
+        </div>
+
+        <div class="progress" aria-hidden="true"><div class="progress__bar" id="progress-bar"></div></div>
+        <div class="progress__meta">
+          <span id="progress-text">Готово к старту</span>
+          <span id="progress-bytes" class="hint"></span>
+        </div>
+
+        <div class="actions">
+          <button class="btn btn--primary" id="start" type="button">Скачать всё</button>
+          <button class="btn btn--secondary" id="pause" type="button" hidden>Пауза</button>
+          <button class="btn btn--ghost" id="stop" type="button" hidden>Стоп</button>
+          <span class="hint" id="run-hint">Остановка не перезапускает загрузки сама — так ничего не теряется.</span>
+        </div>
+
+        <ul class="active" id="active-list" hidden></ul>
+      </section>
+
+      <!-- 4. Отчёт -->
+      <section class="card" id="errors-card" hidden aria-labelledby="errors-title">
+        <div class="card__head">
+          <div>
+            <h2 class="card__title" id="errors-title">Отчёт о загрузке</h2>
+            <p class="report__summary" id="report-summary">—</p>
+            <p class="hint" id="report-note" hidden></p>
+          </div>
+          <div class="actions actions--tight">
+            <button class="btn btn--secondary btn--sm" id="retry-errors" type="button">Повторить ошибки</button>
+            <button class="btn btn--ghost btn--sm" id="save-report" type="button">Скачать отчёт (JSON)</button>
+            <button class="btn btn--ghost btn--sm" id="save-report-txt" type="button">Скачать отчёт (.txt)</button>
+          </div>
+        </div>
+        <ul class="errors" id="error-list"></ul>
+        <div class="import">
+          <label class="field field--file">
+            <span class="field__label">Продолжить позже</span>
+            <span class="hint">Откройте сохранённый журнал (.json) — сервис возьмёт из него только неудачные файлы. Уже скачанное пропускается.</span>
+            <input id="report-file" class="input input--file" type="file" accept="application/json,.json">
+          </label>
+          <p class="error-text" id="import-error" role="alert" hidden></p>
+        </div>
+      </section>
+
+    </div>
+
+    <aside class="layout__side">
+
+      <section class="card card--flat" id="how">
+        <h2 class="card__title">Как это работает</h2>
+        <ol class="steps">
+          <li><span class="steps__n">1</span><div><b>Ссылка.</b> Вставьте адрес публичной папки и нажмите «Проверить папку».</div></li>
+          <li><span class="steps__n">2</span><div><b>Папка.</b> Выберите, куда сохранять: структура вложенных папок останется прежней.</div></li>
+          <li><span class="steps__n">3</span><div><b>Файлы.</b> «Скачать всё» — сервис идёт по файлам, показывает прогресс и складывает неудачи в журнал.</div></li>
+        </ol>
+      </section>
+
+      <section class="card card--flat">
+        <h2 class="card__title">Что важно знать</h2>
+        <ul class="notes">
+          <li>Работают только публичные ссылки. Закрытую папку сервис не откроет.</li>
+          <li>Яндекс может отказать отдельным файлам — это нормально, повторите их из журнала.</li>
+          <li>Вкладку можно свернуть, но не закрывать. Если закрыть или обновить страницу — вернитесь: сервис предложит продолжить с того же места, недокачанные файлы не останутся битыми.</li>
+          <li>20 потоков быстрее, но Яндекс чаще отвечает «слишком часто». Начинайте с 5.</li>
+        </ul>
+      </section>
+
+      <section class="card card--flat">
+        <h2 class="card__title">Браузер</h2>
+        <p class="hint">Выбор папки и потоковая запись — Chrome и Edge 120+. Safari и Firefox скачивают в «Загрузки» без сохранения структуры.</p>
+      </section>
+
+    </aside>
+  </div>
+</main>
+
+<footer class="footer">
+  <div class="footer__inner">
+    <img class="footer__logo" src="assets/logo/logo-etagi-white.png" alt="Этажи" width="110" height="22">
+    <p class="footer__text">Внутренний инструмент для работы с материалами партнёров. Публичный API Яндекс&nbsp;Диска, без установки.</p>
+  </div>
+</footer>
+
+<script type="module" src="js/app.js?v=1.0.0"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "etagi-disk",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "«Файлы с Диска» — поштучная загрузка публичных папок Яндекс.Диска для «Этажей»",
+  "scripts": {
+    "test": "NODE_OPTIONS=--dns-result-order=ipv4first node tests/engine.test.mjs",
+    "build": "node build.mjs",
+    "serve": "python3 -m http.server 8777"
+  }
+}
